@@ -20,9 +20,88 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torchvision import transforms
+from qiskit import QuantumCircuit
+from qiskit.utils import algorithm_globals
+from qiskit.circuit import Parameter
+from qiskit.circuit.library import RealAmplitudes, ZZFeatureMap
+from qiskit_machine_learning.neural_networks import SamplerQNN, EstimatorQNN
+from qiskit_machine_learning.connectors import TorchConnector
+from qiskit_machine_learning.algorithms.classifiers import NeuralNetworkClassifier, VQC
+
 
 from ..utils import Log
 from .base import *
+
+
+class Net(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.conv1 = nn.Conv2d(3, 6, 5)
+        self.pool = nn.MaxPool2d(2, 2)
+        self.conv2 = nn.Conv2d(6, 16, 5)
+        self.fc1 = nn.Linear(16 * 5 * 5, 120)
+        self.fc2 = nn.Linear(120, 84)
+        # self.qnn = TorchConnector(qnn)  # Apply torch connector, weights chosen
+        # uniformly at random from interval [-1,1].
+        self.fc3 = nn.Linear(84,3)  # 1-dimensional output from QNN
+        self.qnn = TorchConnector(self.create_qnn())  # Apply torch connector, weights chosen
+        self.fc4 = nn.Linear(4,4)
+
+
+    def forward(self, x):
+        x = self.pool(F.relu(self.conv1(x)))
+        x = self.pool(F.relu(self.conv2(x)))
+        x = torch.flatten(x, 1) # flatten all dimensions except batch
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        x = self.fc3(x)
+        x = self.qnn(x)  # apply QNN
+        x = self.fc4(x)
+        return x
+
+    def create_qnn(self):
+        feature_map = ZZFeatureMap(3)
+        ansatz = RealAmplitudes(3, reps=1)
+        qc = QuantumCircuit(3)
+        qc.compose(feature_map, inplace=True)
+        qc.compose(ansatz, inplace=True)
+        
+        # REMEMBER TO SET input_gradients=True FOR ENABLING HYBRID GRADIENT BACKPROP
+        parity = lambda x: "{:b}".format(x).count("1") % 4  # optional interpret function
+        output_shape = 4  # parity = 0, 1
+        qnn = SamplerQNN(
+            circuit=qc,
+            input_params=feature_map.parameters,
+            weight_params=ansatz.parameters,
+            input_gradients=True,
+            interpret=parity,
+            output_shape=output_shape,
+        )
+        return qnn
+
+class nNet(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.conv1 = nn.Conv2d(3, 6, 5)
+        self.pool = nn.MaxPool2d(2, 2)
+        self.conv2 = nn.Conv2d(6, 16, 5)
+        self.fc1 = nn.Linear(16 * 5 * 5, 120)
+        self.fc2 = nn.Linear(120, 84)
+        # self.qnn = TorchConnector(qnn)  # Apply torch connector, weights chosen
+        # uniformly at random from interval [-1,1].
+        self.fc3 = nn.Linear(84,4)  # 1-dimensional output from QNN
+        self.fc4 = nn.Linear(4,4)
+
+
+    def forward(self, x):
+        x = self.pool(F.relu(self.conv1(x)))
+        x = self.pool(F.relu(self.conv2(x)))
+        x = torch.flatten(x, 1) # flatten all dimensions except batch
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        x = self.fc3(x)
+        x = self.fc4(x)
+        return x
 
 
 class MNISTBlock(nn.Module):
@@ -287,13 +366,13 @@ class PostTensorTransform(torch.nn.Module):
         super(PostTensorTransform, self).__init__()
         if dataset_name == 'mnist':
             input_height, input_width = 28, 28
-        elif dataset_name == 'cifar10':
+        elif dataset_name == 'cifar10' or 'ncifar10':
             input_height, input_width = 32, 32
         elif dataset_name == 'gtsrb':
             input_height, input_width = 32, 32
         self.random_crop = ProbTransform(transforms.RandomCrop((input_height, input_width), padding=5), p=0.8) # ProbTransform(A.RandomCrop((input_height, input_width), padding=5), p=0.8)
         self.random_rotation = ProbTransform(transforms.RandomRotation(10), p=0.5) # ProbTransform(A.RandomRotation(10), p=0.5)
-        if dataset_name == "cifar10":
+        if dataset_name == "cifar10" or 'ncifar10':
             self.random_horizontal_flip = transforms.RandomHorizontalFlip(p=0.5) # A.RandomHorizontalFlip(p=0.5)
 
     def forward(self, x):
@@ -413,12 +492,18 @@ class LIRA(Base):
             return create_mnist
         elif self.dataset_name == 'cifar10':
             def create_cifar():
-                return VGG('VGG11', num_classes=10) # core.models.vgg11(num_classes=10) #core.models.ResNet(18)
+                # return VGG('VGG11', num_classes=10) # core.models.vgg11(num_classes=10) #core.models.ResNet(18)
+                return Net()
             return create_cifar
         elif self.dataset_name == 'gtsrb':
             def create_gtsrb():
                 return VGG('VGG11', num_classes=43) # core.models.vgg11(num_classes=43) #core.models.ResNet(18, 43)
             return create_gtsrb
+        elif self.dataset_name == 'ncifar10':
+            def create_ncifar():
+                # return VGG('VGG11', num_classes=10) # core.models.vgg11(num_classes=10) #core.models.ResNet(18)
+                return nNet()
+            return create_ncifar
 
     def create_atkmodel(self):
         """
@@ -429,6 +514,10 @@ class LIRA(Base):
             # Copy of attack model
             tgtmodel = MNISTAutoencoder()
         elif self.dataset_name == 'cifar10':
+            atkmodel = UNet(3)
+            # Copy of attack model
+            tgtmodel = UNet(3)
+        elif self.dataset_name == 'ncifar10':
             atkmodel = UNet(3)
             # Copy of attack model
             tgtmodel = UNet(3)
@@ -444,7 +533,7 @@ class LIRA(Base):
         """
         if self.dataset_name == 'mnist':
             return torch.clamp(x, -1.0, 1.0)
-        elif self.dataset_name == 'cifar10':
+        elif self.dataset_name == 'cifar10' or 'ncifar10':
             return x
         elif self.dataset_name == 'gtsrb':
             return torch.clamp(x, 0.0, 1.0)
@@ -460,6 +549,7 @@ class LIRA(Base):
             self.current_schedule = deepcopy(schedule)
         
         if 'pretrain' in self.current_schedule:
+            print("Pretrain activated")
             self.model.load_state_dict(torch.load(self.current_schedule['pretrain']), strict=False)
 
         # Use GPU
@@ -487,20 +577,20 @@ class LIRA(Base):
             self.train_dataset,
             batch_size=self.current_schedule['batch_size'],
             shuffle=True,
-            num_workers=self.current_schedule['num_workers'],
+            # num_workers=self.current_schedule['num_workers'],
             drop_last=False,
             pin_memory=True,
-            worker_init_fn=self._seed_worker
+            # worker_init_fn=self._seed_worker
         )
 
         test_loader = DataLoader(
             self.test_dataset,
             batch_size=self.current_schedule['batch_size'],
             shuffle=False,
-            num_workers=self.current_schedule['num_workers'],
+            # num_workers=self.current_schedule['num_workers'],
             drop_last=False,
             pin_memory=True,
-            worker_init_fn=self._seed_worker
+            # worker_init_fn=self._seed_worker
         )
 
         self.model = self.model.to(device)
@@ -511,14 +601,15 @@ class LIRA(Base):
         tgtmodel.load_state_dict(atkmodel.state_dict(), strict=True)
 
         # Optimizer
-        optimizer = torch.optim.SGD(self.model.parameters(), lr=self.current_schedule['lr'], momentum=self.current_schedule['momentum'])
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=self.current_schedule['lr'])
         tgtoptimizer = torch.optim.Adam(tgtmodel.parameters(), lr=self.current_schedule['lr_atk'])
         post_transforms = PostTensorTransform(self.dataset_name).to(device)
         target_transform = self.get_target_transform()
         create_net = self.create_net()
         clip_image = self.clip_image
 
-        work_dir = osp.join(self.current_schedule['save_dir'], self.current_schedule['experiment_name'] + '_' + time.strftime("%Y-%m-%d_%H:%M:%S", time.localtime()))
+        work_dir = self.current_schedule['save_dir'] + '/' + self.current_schedule['experiment_name'] + '_'
+        # print(work_dir)
         os.makedirs(work_dir, exist_ok=True)
         log = Log(osp.join(work_dir, 'log.txt'))
 
@@ -559,22 +650,22 @@ class LIRA(Base):
                     train_loader, test_loader, self.current_schedule['train_epoch'], clip_image, testoptimizer=None)
             
             total_num = labels.size(0)
-            prec1, prec5 = accuracy(predict_digits, labels, topk=(1, 5))
+            prec1, prec5 = accuracy(predict_digits, labels, topk=(1,1))
             top1_correct = int(round(prec1.item() / 100.0 * total_num))
             top5_correct = int(round(prec5.item() / 100.0 * total_num))
             msg = "==========Test result on benign test dataset==========\n" + \
                     time.strftime("[%Y-%m-%d_%H:%M:%S] ", time.localtime()) + \
-                    f"Top-1 correct / Total: {top1_correct}/{total_num}, Top-1 accuracy: {top1_correct/total_num}, Top-5 correct / Total: {top5_correct}/{total_num}, Top-5 accuracy: {top5_correct/total_num} time: {time.time()-last_time}\n"
+                    f"Top-1 correct / Total: {top1_correct}/{total_num}, Top-1 accuracy: {top1_correct/total_num}, Top-3 correct / Total: {top5_correct}/{total_num}, Top-3 accuracy: {top5_correct/total_num} time: {time.time()-last_time}\n"
             log(msg)
             acc_clean = prec1
 
             total_num = tri_labels.size(0)
-            prec1, prec5 = accuracy(tri_predict_digits, tri_labels, topk=(1, 5))
+            prec1, prec5 = accuracy(tri_predict_digits, tri_labels, topk=(1,1))
             top1_correct = int(round(prec1.item() / 100.0 * total_num))
             top5_correct = int(round(prec5.item() / 100.0 * total_num))
             msg = "==========Test result on poisoned test dataset==========\n" + \
                     time.strftime("[%Y-%m-%d_%H:%M:%S] ", time.localtime()) + \
-                    f"Top-1 correct / Total: {top1_correct}/{total_num}, Top-1 accuracy: {top1_correct/total_num}, Top-5 correct / Total: {top5_correct}/{total_num}, Top-5 accuracy: {top5_correct/total_num}, time: {time.time()-last_time}\n"
+                    f"Top-1 correct / Total: {top1_correct}/{total_num}, Top-1 accuracy: {top1_correct/total_num}, Top-3 correct / Total: {top5_correct}/{total_num}, Top-3 accuracy: {top5_correct/total_num}, time: {time.time()-last_time}\n"
             log(msg)
             acc_poison = prec1
 
@@ -596,8 +687,7 @@ class LIRA(Base):
         self.atkmodel = atkmodel
         atkmodel.load_state_dict(best_atkmodelckpt)
         # Optimizer
-        optimizerC = torch.optim.SGD(self.model.parameters(), self.current_schedule['tune_test_lr'], momentum=self.current_schedule['tune_momentum'], weight_decay=self.current_schedule['tune_weight_decay'])
-        # Scheduler
+        optimizerC = torch.optim.Adam(self.model.parameters(), self.current_schedule['tune_test_lr'])
         schedulerC_milestones = [int(e) for e in self.current_schedule['schedulerC_milestones'].split(',')]
         schedulerC = torch.optim.lr_scheduler.MultiStepLR(optimizerC, schedulerC_milestones, self.current_schedule['schedulerC_lambda'])
         self.log = log
@@ -656,15 +746,16 @@ class LIRA(Base):
             self.clear_grad(model)
             paragrads = torch.autograd.grad(loss, model.parameters(),
                                             create_graph=True)
-            for i, (layername, layer) in enumerate(model.named_parameters()):
-                modulenames, weightname = \
-                    layername.split('.')[:-1], layername.split('.')[-1]
-                module = tmpmodel._modules[modulenames[0]]
-                # TODO: could be potentially faster if we save the intermediate mappings
-                for name in modulenames[1:]:
-                    module = module._modules[name]
-                module._parameters[weightname] = \
-                    layer - clsoptimizer.param_groups[0]['lr'] * paragrads[i]        
+            # for i, (layername, layer) in enumerate(model.named_parameters()):
+            #     modulenames, weightname = \
+            #         layername.split('.')[:-1], layername.split('.')[-1]
+            #     print(module)
+            #     module = tmpmodel._modules[modulenames[0]]
+            #     # TODO: could be potentially faster if we save the intermediate mappings
+            #     for name in modulenames[1:]:
+            #         module = module._modules[name]
+            #     module._parameters[weightname] = \
+            #         layer - clsoptimizer.param_groups[0]['lr'] * paragrads[i]        
             tgtoptimizer.zero_grad()
             
             noise = tgtmodel(data) * self.eps
@@ -709,7 +800,7 @@ class LIRA(Base):
         
         atkmodel.eval()
         if testoptimizer is None:
-            testoptimizer = torch.optim.SGD(model.parameters(), lr=self.current_schedule['lr'])
+            testoptimizer = torch.optim.Adam(model.parameters(), lr=self.current_schedule['lr'])
         for cepoch in range(trainepoch):
             model.train()
             for batch_idx, (data, target) in enumerate(train_loader):
@@ -780,7 +871,7 @@ class LIRA(Base):
         
         if optimizerC is None:
             print('No optimizer, creating default SGD...')  
-            optimizerC = torch.optim.SGD(model.parameters(), lr=self.current_schedule['tune_test_lr'])
+            optimizerC = torch.optim.Adam(model.parameters(), lr=self.current_schedule['tune_test_lr'])
         if schedulerC is None:
             print('No scheduler, creating default 100,200,300,400...')  
             schedulerC = torch.optim.lr_scheduler.MultiStepLR(optimizerC, [100, 200, 300, 400], self.current_schedule['tune_test_lr'])
@@ -865,22 +956,23 @@ class LIRA(Base):
                     tri_labels = torch.cat(tri_labels, dim=0)
 
                 total_num = labels.size(0)
-                prec1, prec5 = accuracy(predict_digits, labels, topk=(1, 5))
+                prec1, prec5 = accuracy(predict_digits, labels, topk=(1,1))
+                print(predict_digits)
                 top1_correct = int(round(prec1.item() / 100.0 * total_num))
                 top5_correct = int(round(prec5.item() / 100.0 * total_num))
                 msg = "==========Test result on benign test dataset==========\n" + \
                         time.strftime("[%Y-%m-%d_%H:%M:%S] ", time.localtime()) + \
-                        f"Top-1 correct / Total: {top1_correct}/{total_num}, Top-1 accuracy: {top1_correct/total_num}, Top-5 correct / Total: {top5_correct}/{total_num}, Top-5 accuracy: {top5_correct/total_num} time: {time.time()-self.last_time}\n"
+                        f"Top-1 correct / Total: {top1_correct}/{total_num}, Top-1 accuracy: {top1_correct/total_num}, Top-3 correct / Total: {top5_correct}/{total_num}, Top-3 accuracy: {top5_correct/total_num} time: {time.time()-self.last_time}\n"
                 self.log(msg)
                 acc_clean = prec1
 
                 total_num = tri_labels.size(0)
-                prec1, prec5 = accuracy(tri_predict_digits, tri_labels, topk=(1, 5))
+                prec1, prec5 = accuracy(tri_predict_digits, tri_labels, topk=(1,1))
                 top1_correct = int(round(prec1.item() / 100.0 * total_num))
                 top5_correct = int(round(prec5.item() / 100.0 * total_num))
                 msg = "==========Test result on poisoned test dataset==========\n" + \
                         time.strftime("[%Y-%m-%d_%H:%M:%S] ", time.localtime()) + \
-                        f"Top-1 correct / Total: {top1_correct}/{total_num}, Top-1 accuracy: {top1_correct/total_num}, Top-5 correct / Total: {top5_correct}/{total_num}, Top-5 accuracy: {top5_correct/total_num}, time: {time.time()-self.last_time}\n"
+                        f"Top-1 correct / Total: {top1_correct}/{total_num}, Top-1 accuracy: {top1_correct/total_num}, Top-3 correct / Total: {top5_correct}/{total_num}, Top-3 accuracy: {top5_correct/total_num}, time: {time.time()-self.last_time}\n"
                 self.log(msg)
                 acc_poison = prec1
                 
@@ -913,7 +1005,7 @@ class LIRA(Base):
                     self.log(msg)
 
 
-    def _test(self, dataset, device, batch_size=16, num_workers=8, model=None, atkmodel=None):
+    def _test(self, dataset, device, batch_size=16, num_workers=0, model=None, atkmodel=None):
         if model is None:
             model = self.model
         else:
@@ -931,7 +1023,7 @@ class LIRA(Base):
                 dataset,
                 batch_size=batch_size,
                 shuffle=False,
-                num_workers=num_workers,
+                # num_workers=num_workers,
                 drop_last=False,
                 pin_memory=True,
                 worker_init_fn=self._seed_worker
@@ -1010,7 +1102,7 @@ class LIRA(Base):
         last_time = time.time()
         predict_digits, labels, tri_predict_digits, tri_labels = self._test(test_dataset, device, self.current_schedule['batch_size'], self.current_schedule['num_workers'], model, atkmodel)        
         total_num = labels.size(0)
-        prec1, prec5 = accuracy(predict_digits, labels, topk=(1, 5))
+        prec1, prec5 = accuracy(predict_digits, labels, topk=(1,1))
         top1_correct = int(round(prec1.item() / 100.0 * total_num))
         top5_correct = int(round(prec5.item() / 100.0 * total_num))
         msg = "==========Test result on benign test dataset==========\n" + \
@@ -1019,7 +1111,7 @@ class LIRA(Base):
         log(msg)
 
         total_num = tri_labels.size(0)
-        prec1, prec5 = accuracy(tri_predict_digits, tri_labels, topk=(1, 5))
+        prec1, prec5 = accuracy(tri_predict_digits, tri_labels, topk=(1,1))
         top1_correct = int(round(prec1.item() / 100.0 * total_num))
         top5_correct = int(round(prec5.item() / 100.0 * total_num))
         msg = "==========Test result on poisoned test dataset==========\n" + \
